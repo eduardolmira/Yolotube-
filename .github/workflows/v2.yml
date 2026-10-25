@@ -1,0 +1,71 @@
+name: Compilar v2
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Organizar estrutura do projeto
+        run: |
+          mkdir -p app/src/main/java/com/example/yolotube
+          mv *.kt app/src/main/java/com/example/yolotube/
+          mv AndroidManifest.xml app/src/main/
+          cat > settings.gradle.kts <<'EOF1'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral(); maven("https://jitpack.io") } }
+          rootProject.name = "YoloTube"
+          include(":app")
+          EOF1
+          cat > build.gradle.kts <<'EOF2'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF2
+          cat > gradle.properties <<'EOF3'
+          android.useAndroidX=true
+          EOF3
+          cat > app/build.gradle.kts <<'EOF4'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.yolotube"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.example.yolotube"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17
+                  isCoreLibraryDesugaringEnabled = true
+              }
+              kotlinOptions { jvmTarget = "17" }
+              packaging { resources { excludes += listOf("META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*", "META-INF/INDEX.LIST") } }
+          }
+          dependencies {
+              implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+              implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("androidx.activity:activity-ktx:1.9.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+          }
+          EOF4
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Compilar
+        shell: bash
+        run: gradle :app:assembleDebug --console=plain 2>&1 | tee build.log
+      - name: Mostrar erro
+        if: failure()
+        shell: bash
+        run: |
+          { sed -n '/What went wrong/,/^\* Try/p' build.log | head -25; echo ----; tail -n 25 build.log; } > err.txt
+          MSG=$(sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' err.txt | cut -c1-3500)
+          echo "::error title=ERRO DO GRADLE::$MSG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YoloTube-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
