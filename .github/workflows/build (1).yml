@@ -1,0 +1,46 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Organizar estrutura do projeto
+        run: |
+          mkdir -p app/src/main/java/com/example/yolotube
+          mv *.kt app/src/main/java/com/example/yolotube/
+          mv AndroidManifest.xml app/src/main/
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.yolotube"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.example.yolotube"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17
+                  isCoreLibraryDesugaringEnabled = true
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+              implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.24.2")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("androidx.activity:activity-ktx:1.9.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+          }
+          EOF
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - run: gradle :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YoloTube-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
