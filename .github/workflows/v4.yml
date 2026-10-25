@@ -1,0 +1,239 @@
+name: Compilar v4
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Organizar estrutura do projeto
+        run: |
+          mkdir -p app/src/main/java/com/example/yolotube
+          rm -f Yt.kt
+          mv *.kt app/src/main/java/com/example/yolotube/
+          mv AndroidManifest.xml app/src/main/
+          cat > settings.gradle.kts <<'EOF1'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral(); maven("https://jitpack.io") } }
+          rootProject.name = "YoloTube"
+          include(":app")
+          EOF1
+          cat > build.gradle.kts <<'EOF2'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF2
+          cat > gradle.properties <<'EOF3'
+          android.useAndroidX=true
+          EOF3
+          cat > app/build.gradle.kts <<'EOF4'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.yolotube"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.example.yolotube"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17
+                  isCoreLibraryDesugaringEnabled = true
+              }
+              kotlinOptions { jvmTarget = "17" }
+              packaging { resources { excludes += listOf("META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*", "META-INF/INDEX.LIST") } }
+          }
+          dependencies {
+              implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+              implementation("androidx.activity:activity-ktx:1.9.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+          }
+          EOF4
+          cat > app/src/main/java/com/example/yolotube/MainActivity.kt <<'EOF5'
+          package com.example.yolotube
+
+          import android.annotation.SuppressLint
+          import android.content.Context
+          import android.graphics.*
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.PixelCopy
+          import android.view.View
+          import android.view.ViewGroup
+          import android.webkit.WebChromeClient
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.*
+          import androidx.activity.ComponentActivity
+          import androidx.activity.addCallback
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.lifecycle.lifecycleScope
+          import kotlinx.coroutines.*
+          import kotlin.coroutines.resume
+
+          /** Camada transparente que desenha as caixas por cima do vídeo. */
+          class Overlay(c: Context) : View(c) {
+              var dets: List<Det> = emptyList()
+              var dx = 0f
+              var dy = 0f
+              private val box = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 5f; color = Color.GREEN }
+              private val txt = Paint().apply {
+                  color = Color.GREEN; textSize = 40f; style = Paint.Style.FILL; setShadowLayer(4f, 0f, 0f, Color.BLACK)
+              }
+              override fun onDraw(c: Canvas) {
+                  for (d in dets) {
+                      val r = RectF(d.box); r.offset(dx, dy)
+                      c.drawRect(r, box)
+                      c.drawText("${d.label} ${(d.score * 100).toInt()}%", r.left, maxOf(r.top - 6f, 44f), txt)
+                  }
+              }
+          }
+
+          class MainActivity : ComponentActivity() {
+              private var detector: YoloDetector? = null
+              private lateinit var status: TextView
+              private lateinit var url: EditText
+              private lateinit var web: WebView
+              private lateinit var overlay: Overlay
+
+              private val pick = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  uri ?: return@registerForActivityResult
+                  lifecycleScope.launch {
+                      status.text = "Carregando modelo..."
+                      val msg = withContext(Dispatchers.IO) {
+                          val b = contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+                          if (b.size > 1 && b[0] == 'P'.code.toByte() && b[1] == 'K'.code.toByte())
+                              "Arquivo .pt detectado (formato PyTorch, não roda direto no Android). Converta no PC: yolo export model=seu.pt format=onnx"
+                          else try {
+                              detector = YoloDetector(b); "Modelo carregado: ${detector!!.names.size} classes. Agora abra um vídeo e dê play."
+                          } catch (e: Exception) { "Erro ao carregar: ${e.message}" }
+                      }
+                      status.text = msg
+                  }
+              }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(s: Bundle?) {
+                  super.onCreate(s)
+                  val p = (8 * resources.displayMetrics.density).toInt()
+                  status = TextView(this).apply { text = "1) Anexe o modelo (.onnx)  2) Abra um vídeo e dê play" }
+                  url = EditText(this).apply { hint = "Link do YouTube"; setSingleLine(true) }
+                  web = WebView(this).apply {
+                      settings.javaScriptEnabled = true
+                      settings.domStorageEnabled = true
+                      settings.mediaPlaybackRequiresUserGesture = false
+                      webViewClient = WebViewClient()
+                      webChromeClient = WebChromeClient()
+                      loadUrl("https://m.youtube.com")
+                  }
+                  overlay = Overlay(this)
+                  val match = ViewGroup.LayoutParams.MATCH_PARENT
+                  val frame = FrameLayout(this).apply {
+                      addView(web, ViewGroup.LayoutParams(match, match))
+                      addView(overlay, ViewGroup.LayoutParams(match, match))
+                  }
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(p, p * 3, p, p) }
+                  root.addView(Button(this).apply { text = "Anexar modelo (.onnx)"; setOnClickListener { pick.launch(arrayOf("*/*")) } })
+                  root.addView(url)
+                  root.addView(Button(this).apply { text = "Abrir link"; setOnClickListener { openLink() } })
+                  root.addView(status)
+                  root.addView(frame, LinearLayout.LayoutParams(match, 0, 1f))
+                  setContentView(root)
+                  onBackPressedDispatcher.addCallback(this) {
+                      if (web.canGoBack()) web.goBack() else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                  }
+                  loop()
+              }
+
+              private fun openLink() {
+                  val t = url.text.toString().trim()
+                  val id = Regex("(?:youtu\\.be/|v=|shorts/|embed/)([A-Za-z0-9_-]{11})").find(t)?.groupValues?.get(1)
+                  web.loadUrl(
+                      if (id != null) "https://m.youtube.com/watch?v=$id"
+                      else if (t.startsWith("http")) t
+                      else "https://m.youtube.com/results?search_query=" + Uri.encode(t)
+                  )
+              }
+
+              /** Descobre onde está o vídeo dentro da página (em pixels da WebView). */
+              private suspend fun videoRect(): Rect? = withContext(Dispatchers.Main) {
+                  suspendCancellableCoroutine<Rect?> { cont ->
+                      val js = "(function(){var v=document.querySelector('video');if(!v)return '';" +
+                          "var r=v.getBoundingClientRect();return [r.left,r.top,r.width,r.height].join(',');})()"
+                      web.evaluateJavascript(js) { res ->
+                          val parts = (res ?: "").trim('"').split(',')
+                          var out: Rect? = null
+                          if (parts.size == 4) {
+                              val d = resources.displayMetrics.density
+                              val v = parts.map { it.toFloatOrNull() ?: 0f }
+                              val r = Rect((v[0] * d).toInt(), (v[1] * d).toInt(), ((v[0] + v[2]) * d).toInt(), ((v[1] + v[3]) * d).toInt())
+                              if (r.intersect(Rect(0, 0, web.width, web.height)) && r.width() > 100 && r.height() > 60) out = r
+                          }
+                          cont.resume(out)
+                      }
+                  }
+              }
+
+              /** Tira uma "foto" da região do vídeo na tela. */
+              private suspend fun grab(r: Rect): Bitmap? = withContext(Dispatchers.Main) {
+                  val loc = IntArray(2); web.getLocationInWindow(loc)
+                  val src = Rect(loc[0] + r.left, loc[1] + r.top, loc[0] + r.right, loc[1] + r.bottom)
+                  val bmp = Bitmap.createBitmap(r.width(), r.height(), Bitmap.Config.ARGB_8888)
+                  suspendCancellableCoroutine<Bitmap?> { cont ->
+                      try {
+                          PixelCopy.request(window, src, bmp, PixelCopy.OnPixelCopyFinishedListener { code ->
+                              cont.resume(if (code == PixelCopy.SUCCESS) bmp else null)
+                          }, Handler(Looper.getMainLooper()))
+                      } catch (e: Exception) { cont.resume(null) }
+                  }
+              }
+
+              private fun loop() {
+                  lifecycleScope.launch(Dispatchers.Default) {
+                      while (isActive) {
+                          val det = detector
+                          if (det != null) {
+                              val r = videoRect()
+                              if (r == null) {
+                                  withContext(Dispatchers.Main) { overlay.dets = emptyList(); overlay.invalidate() }
+                              } else {
+                                  val bmp = grab(r)
+                                  if (bmp != null) {
+                                      val dets = det.detect(bmp)
+                                      bmp.recycle()
+                                      withContext(Dispatchers.Main) {
+                                          overlay.dets = dets; overlay.dx = r.left.toFloat(); overlay.dy = r.top.toFloat()
+                                          overlay.invalidate()
+                                          status.text = if (dets.isEmpty()) "Nada detectado"
+                                          else dets.joinToString("   ") { "${it.label} ${(it.score * 100).toInt()}%" }
+                                      }
+                                  }
+                              }
+                          }
+                          delay(300)
+                      }
+                  }
+              }
+          }
+          EOF5
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Compilar
+        shell: bash
+        run: gradle :app:assembleDebug --console=plain 2>&1 | tee build.log
+      - name: Mostrar erro
+        if: failure()
+        shell: bash
+        run: |
+          { sed -n '/What went wrong/,/^\* Try/p' build.log | head -25; echo ----; tail -n 25 build.log; } > err.txt
+          MSG=$(sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' err.txt | cut -c1-3500)
+          echo "::error title=ERRO DO GRADLE::$MSG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YoloTube-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
